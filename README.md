@@ -1,4 +1,4 @@
-# Basic-Analytics-Server
+# Basic Analytics Server
 I built a basic analytics server with **FastAPI**, host it on **Azure**, and containerize it using **Docker**.
 Implement endpoints for processing events and generating reports.
 Test the server with **Postman** and ensure correct functionality.
