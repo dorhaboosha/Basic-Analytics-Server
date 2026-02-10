@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
+.env
+
+# Local DB (generated at runtime)
+events.db
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python build / cache
+*.egg-info/
+build/
+dist/
+.pytest_cache/
