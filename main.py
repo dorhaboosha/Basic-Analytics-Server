@@ -14,7 +14,7 @@ can be overridden with EVENTS_DB_PATH (default: events.db next to this file).
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import matplotlib.pyplot as plt
 import io
@@ -107,16 +107,18 @@ app = FastAPI(lifespan=lifespan)
 async def process_event(event: Event):
     """Record a single event (userid, eventname) with current UTC timestamp."""
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO events (eventtimestamputc, userid, eventname)
-        VALUES (?, ?, ?)
-        """,
-        (datetime.utcnow().isoformat(), event.userid, event.eventname),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO events (eventtimestamputc, userid, eventname)
+            VALUES (?, ?, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(), event.userid, event.eventname),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return {"status": "event recorded"}
 
 
@@ -124,19 +126,19 @@ async def process_event(event: Event):
 async def get_reports(lastseconds: int, userid: str):
     """Return all events for the given user in the last `lastseconds` seconds."""
     conn = get_db_connection()
-    cursor = conn.cursor()
-
-    from_datetime = datetime.utcnow() - timedelta(seconds=lastseconds)
-
-    cursor.execute(
-        """
-        SELECT * FROM events
-        WHERE userid = ? AND eventtimestamputc >= ?
-        """,
-        (userid, from_datetime.isoformat()),
-    )
-    rows = cursor.fetchall()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        from_datetime = datetime.now(timezone.utc) - timedelta(seconds=lastseconds)
+        cursor.execute(
+            """
+            SELECT * FROM events
+            WHERE userid = ? AND eventtimestamputc >= ?
+            """,
+            (userid, from_datetime.isoformat()),
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
 
     reports = [
         {
@@ -189,7 +191,7 @@ If the user is interested, you should ask him for his email address and send him
 
 
 @app.post("/call_user")
-async def call_user(phone_number: PhoneNumber):
+def call_user(phone_number: PhoneNumber):
     """Trigger an outbound sales call to the provided E.164 phone number via Bland AI."""
     try:
         result = phone_caller(phone_number.phone_number)
@@ -201,16 +203,29 @@ async def call_user(phone_number: PhoneNumber):
     return {"status": "calling", "bland_response": result}
 
 
+# Limit chart to recent data to avoid unbounded memory use
+CHART_DAYS = 90
+CHART_ROW_LIMIT = 100_000
+
+
 def generate_event_chart():
-    """Build a bar chart of event counts per user from all events; returns base64 PNG or None if no data."""
+    """Build a bar chart of event counts per user from recent events; returns base64 PNG or None if no data."""
     conn = get_db_connection()
     cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM events")
+    since = (datetime.now(timezone.utc) - timedelta(days=CHART_DAYS)).isoformat()
+    cursor.execute(
+        """
+        SELECT eventtimestamputc, userid, eventname FROM events
+        WHERE eventtimestamputc >= ?
+        ORDER BY eventtimestamputc DESC
+        LIMIT ?
+        """,
+        (since, CHART_ROW_LIMIT),
+    )
     rows = cursor.fetchall()
     conn.close()
 
-    df = pd.DataFrame(rows, columns=["time", "userid", "eventname"])
+    df = pd.DataFrame(rows, columns=["eventtimestamputc", "userid", "eventname"])
 
     if df.empty or "userid" not in df.columns:
         return None
@@ -229,6 +244,7 @@ def generate_event_chart():
     buf.seek(0)
     image_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
     buf.close()
+    plt.close()
 
     return image_base64
 
@@ -250,8 +266,7 @@ async def analyze_events():
             """
         )
 
-    if not image_base64.startswith("data:image"):
-        image_base64 = "data:image/png;base64," + image_base64
+    image_base64 = "data:image/png;base64," + image_base64
 
     html_content = f"""
     <html>

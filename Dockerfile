@@ -25,6 +25,11 @@ RUN python -m pip install --upgrade pip && pip install --no-cache-dir -r require
 # Copy project files
 COPY . .
 
+# Run as non-root user
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+RUN chown -R appuser:appgroup $APP_HOME
+USER appuser
+
 # Default port (platforms may override)
 ENV PORT=8000
 

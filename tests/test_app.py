@@ -50,8 +50,8 @@ def test_process_event_inserts_row(client):
 
 
 def test_invalid_event_data_returns_422(client):
-    """POST /process_event with wrong types (e.g. int instead of str) returns 422."""
-    resp = client.post("/process_event", json={"userid": 123, "eventname": 456})
+    """POST /process_event with structurally invalid payload (missing required field) returns 422."""
+    resp = client.post("/process_event", json={"userid": "u1"})  # missing "eventname"
     assert resp.status_code == 422
 
 
