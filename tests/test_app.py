@@ -1,3 +1,11 @@
+"""
+Pytest tests for the Basic Analytics Server FastAPI app.
+
+Covers: POST /process_event, POST /get_reports, POST /call_user (missing-api-key path).
+Uses a temporary SQLite DB per test via the client fixture; BLAND_API_KEY is not required
+except in test_call_user_without_key_returns_400 where we assert its absence.
+"""
+
 import os
 import importlib
 import sqlite3
@@ -23,6 +31,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_process_event_inserts_row(client):
+    """POST /process_event with valid JSON returns 200 and persists the event in the DB."""
     resp = client.post("/process_event", json={"userid": "test_user", "eventname": "test_event"})
     assert resp.status_code == 200
     assert resp.json() == {"status": "event recorded"}
@@ -41,11 +50,13 @@ def test_process_event_inserts_row(client):
 
 
 def test_invalid_event_data_returns_422(client):
-    resp = client.post("/process_event", json={"userid": 123, "eventname": 456})
+    """POST /process_event with structurally invalid payload (missing required field) returns 422."""
+    resp = client.post("/process_event", json={"userid": "u1"})  # missing "eventname"
     assert resp.status_code == 422
 
 
 def test_get_reports_returns_events(client):
+    """POST /get_reports for a user with an event in the last N seconds returns that event in reports."""
     # Insert an event
     client.post("/process_event", json={"userid": "u1", "eventname": "e1"})
 
@@ -73,7 +84,6 @@ def test_call_user_without_key_returns_400(tmp_path, monkeypatch):
     monkeypatch.setenv("BLAND_API_KEY", "")
 
     import main
-    import importlib
     importlib.reload(main)
 
     with TestClient(main.app) as client:

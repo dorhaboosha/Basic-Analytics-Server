@@ -1,7 +1,20 @@
+"""
+Basic Analytics Server — FastAPI application for event tracking, reporting, and outreach.
+
+This module provides:
+- Event ingestion: record user events via POST /process_event.
+- Event reports: fetch events for a user in a time window via POST /get_reports.
+- Outbound calls: trigger a Bland AI sales call via POST /call_user (requires BLAND_API_KEY).
+- Event analytics: view a bar chart of events per user via GET /analyze_events.
+
+Configuration is read from a .env file in the project root. The SQLite database path
+can be overridden with EVENTS_DB_PATH (default: events.db next to this file).
+"""
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import matplotlib.pyplot as plt
 import io
@@ -12,7 +25,9 @@ import os
 import re
 from pathlib import Path
 from dotenv import load_dotenv
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+import logging
+import threading
 
 # -----------------------------------------------------------------------------
 # Load environment variables from a local ".env" file reliably.
@@ -29,41 +44,52 @@ DB_PATH = os.getenv("EVENTS_DB_PATH", str(Path(__file__).resolve().parent / "eve
 # Simple E.164 phone validation: + + 8-16 digits total (first digit 1-9)
 E164_REGEX = re.compile(r"^\+[1-9]\d{7,15}$")
 
+logger = logging.getLogger(__name__)
+
 
 # -----------------------------------------------------------------------------
 # Models
 # -----------------------------------------------------------------------------
 class Event(BaseModel):
+    """Payload for recording a single analytics event."""
+
     userid: str
     eventname: str
 
 
 class PhoneNumber(BaseModel):
+    """Payload for initiating an outbound call; must be E.164 format (e.g. +972501234567)."""
+
     phone_number: str
 
 
 # -----------------------------------------------------------------------------
 # DB helpers
 # -----------------------------------------------------------------------------
+@contextmanager
 def get_db_connection():
+    """Yield a SQLite connection; automatically closed on exit. Rows are sqlite3.Row dict-like objects."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
-    conn = get_db_connection()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS events (
-            eventtimestamputc TEXT,
-            userid TEXT,
-            eventname TEXT
+    """Create the events table if it does not exist (eventtimestamputc, userid, eventname)."""
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                eventtimestamputc TEXT,
+                userid TEXT,
+                eventname TEXT
+            )
+            """
         )
-        """
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 # -----------------------------------------------------------------------------
@@ -71,6 +97,7 @@ def init_db():
 # -----------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Ensure the events table exists on startup; no cleanup on shutdown."""
     # Startup
     init_db()
     yield
@@ -85,50 +112,47 @@ app = FastAPI(lifespan=lifespan)
 # -----------------------------------------------------------------------------
 @app.post("/process_event")
 async def process_event(event: Event):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO events (eventtimestamputc, userid, eventname)
-        VALUES (?, ?, ?)
-        """,
-        (datetime.utcnow().isoformat(), event.userid, event.eventname),
-    )
-    conn.commit()
-    conn.close()
+    """Record a single event (userid, eventname) with current UTC timestamp."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO events (eventtimestamputc, userid, eventname)
+            VALUES (?, ?, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(), event.userid, event.eventname),
+        )
+        conn.commit()
     return {"status": "event recorded"}
 
 
 @app.post("/get_reports")
 async def get_reports(lastseconds: int, userid: str):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    from_datetime = datetime.utcnow() - timedelta(seconds=lastseconds)
-
-    cursor.execute(
-        """
-        SELECT * FROM events
-        WHERE userid = ? AND eventtimestamputc >= ?
-        """,
-        (userid, from_datetime.isoformat()),
-    )
-    rows = cursor.fetchall()
-    conn.close()
-
-    reports = [
-        {
-            "eventtimestamputc": row["eventtimestamputc"],
-            "userid": row["userid"],
-            "eventname": row["eventname"],
-        }
-        for row in rows
-    ]
-
+    """Return all events for the given user in the last `lastseconds` seconds."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        from_datetime = datetime.now(timezone.utc) - timedelta(seconds=lastseconds)
+        cursor.execute(
+            """
+            SELECT * FROM events
+            WHERE userid = ? AND eventtimestamputc >= ?
+            """,
+            (userid, from_datetime.isoformat()),
+        )
+        rows = cursor.fetchall()
+        reports = [
+            {
+                "eventtimestamputc": row["eventtimestamputc"],
+                "userid": row["userid"],
+                "eventname": row["eventname"],
+            }
+            for row in rows
+        ]
     return {"reports": reports}
 
 
 def phone_caller(phone_number: str):
+    """Initiate a Bland AI sales call to the given E.164 phone number. Requires BLAND_API_KEY in env."""
     api_key = os.getenv("BLAND_API_KEY")
     if not api_key:
         raise RuntimeError("Missing BLAND_API_KEY. Set it in .env (local) or as an env var in Docker.")
@@ -166,50 +190,73 @@ If the user is interested, you should ask him for his email address and send him
 
 
 @app.post("/call_user")
-async def call_user(phone_number: PhoneNumber):
+def call_user(phone_number: PhoneNumber):
+    """Trigger an outbound sales call to the provided E.164 phone number via Bland AI."""
     try:
         result = phone_caller(phone_number.phone_number)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        logger.exception("Unexpected error in call_user")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
     return {"status": "calling", "bland_response": result}
 
 
+# Limit chart to recent data to avoid unbounded memory use
+CHART_DAYS = 90
+CHART_ROW_LIMIT = 100_000
+
+# Serialize matplotlib use (not thread-safe) when endpoint runs in thread pool
+_chart_lock = threading.Lock()
+
+
 def generate_event_chart():
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    """Build a bar chart of event counts per user from recent events; returns base64 PNG or None if no data."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        since = (datetime.now(timezone.utc) - timedelta(days=CHART_DAYS)).isoformat()
+        cursor.execute(
+            """
+            SELECT eventtimestamputc, userid, eventname FROM events
+            WHERE eventtimestamputc >= ?
+            ORDER BY eventtimestamputc DESC
+            LIMIT ?
+            """,
+            (since, CHART_ROW_LIMIT),
+        )
+        rows = cursor.fetchall()
 
-    cursor.execute("SELECT * FROM events")
-    rows = cursor.fetchall()
-    conn.close()
-
-    df = pd.DataFrame(rows, columns=["time", "userid", "eventname"])
+    df = pd.DataFrame(rows, columns=["eventtimestamputc", "userid", "eventname"])
 
     if df.empty or "userid" not in df.columns:
         return None
 
     event_counts = df["userid"].value_counts()
 
-    plt.figure(figsize=(10, 6))
-    event_counts.plot(kind="bar")
-    plt.xlabel("User ID")
-    plt.ylabel("Number of Events")
-    plt.title("Number of Events per User")
-    plt.tight_layout()
+    with _chart_lock:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        try:
+            event_counts.plot(kind="bar", ax=ax)
+            ax.set_xlabel("User ID")
+            ax.set_ylabel("Number of Events")
+            ax.set_title("Number of Events per User")
+            fig.tight_layout()
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    image_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    buf.close()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png")
+            buf.seek(0)
+            image_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            buf.close()
+        finally:
+            plt.close(fig)
 
     return image_base64
 
 
 @app.get("/analyze_events", response_class=HTMLResponse)
-async def analyze_events():
+def analyze_events():
+    """Serve an HTML page with a bar chart of events per user, or a message when no events exist."""
     image_base64 = generate_event_chart()
 
     if not image_base64:
@@ -224,8 +271,7 @@ async def analyze_events():
             """
         )
 
-    if not image_base64.startswith("data:image"):
-        image_base64 = "data:image/png;base64," + image_base64
+    image_base64 = "data:image/png;base64," + image_base64
 
     html_content = f"""
     <html>
