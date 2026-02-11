@@ -25,7 +25,9 @@ import os
 import re
 from pathlib import Path
 from dotenv import load_dotenv
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+import logging
+import threading
 
 # -----------------------------------------------------------------------------
 # Load environment variables from a local ".env" file reliably.
@@ -41,6 +43,8 @@ DB_PATH = os.getenv("EVENTS_DB_PATH", str(Path(__file__).resolve().parent / "eve
 
 # Simple E.164 phone validation: + + 8-16 digits total (first digit 1-9)
 E164_REGEX = re.compile(r"^\+[1-9]\d{7,15}$")
+
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -62,27 +66,30 @@ class PhoneNumber(BaseModel):
 # -----------------------------------------------------------------------------
 # DB helpers
 # -----------------------------------------------------------------------------
+@contextmanager
 def get_db_connection():
-    """Open a SQLite connection to the events DB; rows are returned as sqlite3.Row dict-like objects."""
+    """Yield a SQLite connection; automatically closed on exit. Rows are sqlite3.Row dict-like objects."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
     """Create the events table if it does not exist (eventtimestamputc, userid, eventname)."""
-    conn = get_db_connection()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS events (
-            eventtimestamputc TEXT,
-            userid TEXT,
-            eventname TEXT
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                eventtimestamputc TEXT,
+                userid TEXT,
+                eventname TEXT
+            )
+            """
         )
-        """
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 # -----------------------------------------------------------------------------
@@ -106,8 +113,7 @@ app = FastAPI(lifespan=lifespan)
 @app.post("/process_event")
 async def process_event(event: Event):
     """Record a single event (userid, eventname) with current UTC timestamp."""
-    conn = get_db_connection()
-    try:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -117,16 +123,13 @@ async def process_event(event: Event):
             (datetime.now(timezone.utc).isoformat(), event.userid, event.eventname),
         )
         conn.commit()
-    finally:
-        conn.close()
     return {"status": "event recorded"}
 
 
 @app.post("/get_reports")
 async def get_reports(lastseconds: int, userid: str):
     """Return all events for the given user in the last `lastseconds` seconds."""
-    conn = get_db_connection()
-    try:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         from_datetime = datetime.now(timezone.utc) - timedelta(seconds=lastseconds)
         cursor.execute(
@@ -137,18 +140,14 @@ async def get_reports(lastseconds: int, userid: str):
             (userid, from_datetime.isoformat()),
         )
         rows = cursor.fetchall()
-    finally:
-        conn.close()
-
-    reports = [
-        {
-            "eventtimestamputc": row["eventtimestamputc"],
-            "userid": row["userid"],
-            "eventname": row["eventname"],
-        }
-        for row in rows
-    ]
-
+        reports = [
+            {
+                "eventtimestamputc": row["eventtimestamputc"],
+                "userid": row["userid"],
+                "eventname": row["eventname"],
+            }
+            for row in rows
+        ]
     return {"reports": reports}
 
 
@@ -198,7 +197,8 @@ def call_user(phone_number: PhoneNumber):
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        logger.exception("Unexpected error in call_user")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
     return {"status": "calling", "bland_response": result}
 
@@ -207,23 +207,25 @@ def call_user(phone_number: PhoneNumber):
 CHART_DAYS = 90
 CHART_ROW_LIMIT = 100_000
 
+# Serialize matplotlib use (not thread-safe) when endpoint runs in thread pool
+_chart_lock = threading.Lock()
+
 
 def generate_event_chart():
     """Build a bar chart of event counts per user from recent events; returns base64 PNG or None if no data."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    since = (datetime.now(timezone.utc) - timedelta(days=CHART_DAYS)).isoformat()
-    cursor.execute(
-        """
-        SELECT eventtimestamputc, userid, eventname FROM events
-        WHERE eventtimestamputc >= ?
-        ORDER BY eventtimestamputc DESC
-        LIMIT ?
-        """,
-        (since, CHART_ROW_LIMIT),
-    )
-    rows = cursor.fetchall()
-    conn.close()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        since = (datetime.now(timezone.utc) - timedelta(days=CHART_DAYS)).isoformat()
+        cursor.execute(
+            """
+            SELECT eventtimestamputc, userid, eventname FROM events
+            WHERE eventtimestamputc >= ?
+            ORDER BY eventtimestamputc DESC
+            LIMIT ?
+            """,
+            (since, CHART_ROW_LIMIT),
+        )
+        rows = cursor.fetchall()
 
     df = pd.DataFrame(rows, columns=["eventtimestamputc", "userid", "eventname"])
 
@@ -232,25 +234,28 @@ def generate_event_chart():
 
     event_counts = df["userid"].value_counts()
 
-    plt.figure(figsize=(10, 6))
-    event_counts.plot(kind="bar")
-    plt.xlabel("User ID")
-    plt.ylabel("Number of Events")
-    plt.title("Number of Events per User")
-    plt.tight_layout()
+    with _chart_lock:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        try:
+            event_counts.plot(kind="bar", ax=ax)
+            ax.set_xlabel("User ID")
+            ax.set_ylabel("Number of Events")
+            ax.set_title("Number of Events per User")
+            fig.tight_layout()
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    image_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    buf.close()
-    plt.close()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png")
+            buf.seek(0)
+            image_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            buf.close()
+        finally:
+            plt.close(fig)
 
     return image_base64
 
 
 @app.get("/analyze_events", response_class=HTMLResponse)
-async def analyze_events():
+def analyze_events():
     """Serve an HTML page with a bar chart of events per user, or a message when no events exist."""
     image_base64 = generate_event_chart()
 

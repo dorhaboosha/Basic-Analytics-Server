@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 events.db
+# Exclude .env so secrets (e.g. BLAND_API_KEY) are not baked into the image
 .env
 .git
 .gitignore

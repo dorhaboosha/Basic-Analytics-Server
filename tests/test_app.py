@@ -84,7 +84,6 @@ def test_call_user_without_key_returns_400(tmp_path, monkeypatch):
     monkeypatch.setenv("BLAND_API_KEY", "")
 
     import main
-    import importlib
     importlib.reload(main)
 
     with TestClient(main.app) as client:
