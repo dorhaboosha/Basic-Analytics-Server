@@ -1,3 +1,9 @@
+"""
+Pytest conftest for Basic Analytics Server tests.
+
+Ensures the project root is on sys.path so tests can import the app (e.g. main, main.app).
+Loaded automatically by pytest before test collection.
+"""
 
 import sys
 from pathlib import Path
