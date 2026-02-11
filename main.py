@@ -1,3 +1,16 @@
+"""
+Basic Analytics Server — FastAPI application for event tracking, reporting, and outreach.
+
+This module provides:
+- Event ingestion: record user events via POST /process_event.
+- Event reports: fetch events for a user in a time window via POST /get_reports.
+- Outbound calls: trigger a Bland AI sales call via POST /call_user (requires BLAND_API_KEY).
+- Event analytics: view a bar chart of events per user via GET /analyze_events.
+
+Configuration is read from a .env file in the project root. The SQLite database path
+can be overridden with EVENTS_DB_PATH (default: events.db next to this file).
+"""
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import sqlite3
@@ -34,11 +47,15 @@ E164_REGEX = re.compile(r"^\+[1-9]\d{7,15}$")
 # Models
 # -----------------------------------------------------------------------------
 class Event(BaseModel):
+    """Payload for recording a single analytics event."""
+
     userid: str
     eventname: str
 
 
 class PhoneNumber(BaseModel):
+    """Payload for initiating an outbound call; must be E.164 format (e.g. +972501234567)."""
+
     phone_number: str
 
 
@@ -46,12 +63,14 @@ class PhoneNumber(BaseModel):
 # DB helpers
 # -----------------------------------------------------------------------------
 def get_db_connection():
+    """Open a SQLite connection to the events DB; rows are returned as sqlite3.Row dict-like objects."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
+    """Create the events table if it does not exist (eventtimestamputc, userid, eventname)."""
     conn = get_db_connection()
     conn.execute(
         """
@@ -71,6 +90,7 @@ def init_db():
 # -----------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Ensure the events table exists on startup; no cleanup on shutdown."""
     # Startup
     init_db()
     yield
@@ -85,6 +105,7 @@ app = FastAPI(lifespan=lifespan)
 # -----------------------------------------------------------------------------
 @app.post("/process_event")
 async def process_event(event: Event):
+    """Record a single event (userid, eventname) with current UTC timestamp."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -101,6 +122,7 @@ async def process_event(event: Event):
 
 @app.post("/get_reports")
 async def get_reports(lastseconds: int, userid: str):
+    """Return all events for the given user in the last `lastseconds` seconds."""
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -129,6 +151,7 @@ async def get_reports(lastseconds: int, userid: str):
 
 
 def phone_caller(phone_number: str):
+    """Initiate a Bland AI sales call to the given E.164 phone number. Requires BLAND_API_KEY in env."""
     api_key = os.getenv("BLAND_API_KEY")
     if not api_key:
         raise RuntimeError("Missing BLAND_API_KEY. Set it in .env (local) or as an env var in Docker.")
@@ -167,6 +190,7 @@ If the user is interested, you should ask him for his email address and send him
 
 @app.post("/call_user")
 async def call_user(phone_number: PhoneNumber):
+    """Trigger an outbound sales call to the provided E.164 phone number via Bland AI."""
     try:
         result = phone_caller(phone_number.phone_number)
     except RuntimeError as e:
@@ -178,6 +202,7 @@ async def call_user(phone_number: PhoneNumber):
 
 
 def generate_event_chart():
+    """Build a bar chart of event counts per user from all events; returns base64 PNG or None if no data."""
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -210,6 +235,7 @@ def generate_event_chart():
 
 @app.get("/analyze_events", response_class=HTMLResponse)
 async def analyze_events():
+    """Serve an HTML page with a bar chart of events per user, or a message when no events exist."""
     image_base64 = generate_event_chart()
 
     if not image_base64:
