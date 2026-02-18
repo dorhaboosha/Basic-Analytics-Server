@@ -1,24 +1,26 @@
 """
-Load test for POST /process_event — sends many concurrent requests and reports success count.
+Load test for POST /events — sends many concurrent requests and reports success count.
 
 Usage:
   python scripts/load_test.py
 
-  Override target (e.g. staging):
+Override target (e.g. staging):
   BASE_URL=https://staging.example.com python scripts/load_test.py
 
-Requires: requests, joblib. Install from project root: pip install -r requirements.txt
+Requires: requests, joblib. Install from project root:
+  pip install -r requirements.txt
 """
 
 import os
 import random
+
 import requests
 from joblib import Parallel, delayed
 
-# Default is local Docker run:
-#   http://127.0.0.1:8000/process_event
+# Default is local run:
+#   http://127.0.0.1:8000/events
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
-URL = f"{BASE_URL.rstrip('/')}/process_event"
+URL = f"{BASE_URL.rstrip('/')}/events"
 
 NUM_REQUESTS = 25
 PARALLEL_JOBS = 10
@@ -26,10 +28,10 @@ TIMEOUT_SECONDS = 10
 
 
 def make_request():
-    """POST one random event (userid, eventname) to /process_event; returns (status_code, response_text)."""
+    """POST one random event (user_id, event_name) to /events; returns (status_code, response_text)."""
     data = {
-        "userid": f"User{random.randint(1, 100)}",
-        "eventname": f"Event{random.randint(1, 50)}",
+        "user_id": f"User{random.randint(1, 100)}",
+        "event_name": f"Event{random.randint(1, 50)}",
     }
     r = requests.post(URL, json=data, timeout=TIMEOUT_SECONDS)
     return r.status_code, r.text

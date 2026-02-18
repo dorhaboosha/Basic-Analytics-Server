@@ -1,65 +1,80 @@
 # Basic Analytics Server (FastAPI + SQLite)
 
-A small analytics/log server built with **FastAPI** that stores user events in **SQLite** and provides simple reports + visualization.
-This project was implemented as part of **Assignment – basic server**.
+A small analytics/log server built with **FastAPI** that stores user events in **SQLite** and provides simple reports + visualization.  
+This project was implemented as part of an **Assignment – basic server**.
 
 ## Features
 
-- Log events via `POST /process_event`
-- Store events in SQLite with a **UTC timestamp**
-- Fetch per-user reports from the **last X seconds** via `POST /get_reports`
-- View a chart (events per user) via `GET /analyze_events`
-- Trigger an outbound phone call via `POST /call_user` (Bland.ai)
-- Includes unit tests (`pytest`) and a load test script (`scripts/load_test.py`)
+- **Record events** into SQLite (UTC timestamps)
+- **Fetch per-user reports** for the last _N_ seconds
+- **View analytics chart** (events per user) as an HTML page
+- **Trigger an outbound phone call** via **Bland.ai** (optional)
+- Includes **unit tests** (`pytest`) and a **load test** script (`scripts/load_test.py`)
+- Opening the base URL (`/`) redirects straight to **Swagger docs** (`/docs`)
 
-> `call_user` requires a valid **BLAND_API_KEY** and an **E.164** phone number format. Check Bland.ai for supported regions.
+> Bland.ai calling requires a valid **BLAND_API_KEY** and an **E.164** phone number format. Check Bland.ai for supported regions.
+
+---
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Open:
+- Docs (Swagger UI): `http://localhost:8000/docs` (also `http://localhost:8000/` redirects here)
+- Chart: `http://localhost:8000/analytics/events-per-user`
 
 ---
 
 ## API Endpoints
 
-Base URL when running locally: `http://localhost:8000`
+Base URL (local): `http://localhost:8000`
 
-### 1) `POST /process_event`
+### 1) `POST /events` — Record an event
 **Request body (JSON):**
 ```json
 {
-  "userid": "dudu",
-  "eventname": "level2completed"
+  "user_id": "dudu",
+  "event_name": "level2completed"
 }
 ```
 
 **Example**
 ```bash
-curl -X POST "http://localhost:8000/process_event"   -H "Content-Type: application/json"   -d '{"userid":"dudu","eventname":"level2completed"}'
+curl -X POST "http://localhost:8000/events"   -H "Content-Type: application/json"   -d '{"user_id":"dudu","event_name":"level2completed"}'
 ```
 
 ---
 
-### 2) `POST /get_reports`
-This project implements `get_reports` using **query params**:
-
-`POST /get_reports?lastseconds=<int>&userid=<string>`
+### 2) `POST /events/reports` — Get user events in last N seconds
+**Request body (JSON):**
+```json
+{
+  "user_id": "dudu",
+  "last_seconds": 200
+}
+```
 
 **Example**
 ```bash
-curl -X POST "http://localhost:8000/get_reports?lastseconds=200&userid=dudu"
+curl -X POST "http://localhost:8000/events/reports"   -H "Content-Type: application/json"   -d '{"user_id":"dudu","last_seconds":200}'
 ```
 
 ---
 
-### 3) `GET /analyze_events`
+### 3) `GET /analytics/events-per-user` — Events per user chart
 Returns an **HTML page** with a **PNG chart** (base64-embedded) showing **number of events per user**.
 
 **Example**
 Open in browser:
-- `http://localhost:8000/analyze_events`
+- `http://localhost:8000/analytics/events-per-user`
 
 ---
 
-### 4) `POST /call_user`
-Triggers an automated phone call using **Bland.ai**.
-
+### 4) `POST /outreach/call` — Trigger an outbound phone call (Bland.ai)
 **Request body (JSON):**
 ```json
 {
@@ -69,7 +84,7 @@ Triggers an automated phone call using **Bland.ai**.
 
 **Example**
 ```bash
-curl -X POST "http://localhost:8000/call_user"   -H "Content-Type: application/json"   -d '{"phone_number":"+972501234567"}'
+curl -X POST "http://localhost:8000/outreach/call"   -H "Content-Type: application/json"   -d '{"phone_number":"+972501234567"}'
 ```
 
 ---
@@ -78,12 +93,12 @@ curl -X POST "http://localhost:8000/call_user"   -H "Content-Type: application/j
 
 Create a `.env` file (not committed) or export variables in your shell.
 
-**Required**
-- `EVENTS_DB_PATH` – path to the sqlite file (example: `./events.db`)
-- `BLAND_API_KEY` – required for `POST /call_user`
-
 **Optional**
+- `EVENTS_DB_PATH` – path to the SQLite file; when unset, the app uses `events.db` in the same directory as `main.py` (see `DB_PATH` in `main.py`). Set this to override the default.
 - `PORT` – server port (default `8000`)
+
+**Required only for Bland.ai calling**
+- `BLAND_API_KEY` – required for `POST /outreach/call`
 
 Example `.env`:
 ```env
@@ -125,10 +140,6 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Open:
-- Swagger UI: `http://localhost:8000/docs`
-- Analysis chart: `http://localhost:8000/analyze_events`
-
 ---
 
 ## Run tests
@@ -169,7 +180,7 @@ docker run --rm -p 8000:8000   -e EVENTS_DB_PATH=/data/events.db   -e BLAND_API_
 ## Load test
 
 This repository includes: `scripts/load_test.py`  
-It sends multiple `POST /process_event` requests in parallel using **joblib**.
+It sends multiple `POST /events` requests in parallel using **joblib**.
 
 ### Run against local server
 1) Start the server (local or Docker)  
@@ -179,7 +190,7 @@ python scripts/load_test.py
 ```
 
 ### Run against a different host
-Set `BASE_URL` (the script appends `/process_event` automatically):
+Set `BASE_URL` (the script appends `/events` automatically):
 ```bash
 # Windows (PowerShell):
 $env:BASE_URL="http://127.0.0.1:8000"; python scripts/load_test.py
