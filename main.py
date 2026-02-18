@@ -50,6 +50,7 @@ load_dotenv(dotenv_path=ENV_PATH)
 # Config
 # -----------------------------------------------------------------------------
 DB_PATH = os.getenv("EVENTS_DB_PATH", str(Path(__file__).resolve().parent / "events.db"))
+_current_db_path: str = DB_PATH
 
 # Simple E.164 phone validation: + + 8-16 digits total (first digit 1-9)
 E164_REGEX = re.compile(r"^\+[1-9]\d{7,15}$")
@@ -67,8 +68,8 @@ _chart_lock = threading.Lock()
 class EventIn(BaseModel):
     """Request body for recording a single analytics event."""
 
-    user_id: str = Field(..., description="Unique identifier of the user who triggered the event.")
-    event_name: str = Field(..., description="Name of the event (e.g., 'signup', 'purchase').")
+    user_id: str = Field(..., description="Unique identifier of the user who triggered the event.", max_length=256)
+    event_name: str = Field(..., description="Name of the event (e.g., 'signup', 'purchase').", max_length=256)
 
 
 class EventRecordedOut(BaseModel):
@@ -119,10 +120,10 @@ def get_db_connection():
     """
     Yield a SQLite connection; automatically closed on exit.
 
-    - Uses DB_PATH configuration.
+    - Uses _current_db_path (set by create_app or default DB_PATH).
     - Rows are sqlite3.Row dict-like objects.
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_current_db_path)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -149,6 +150,8 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_userid_tstamp ON events(userid, eventtimestamputc)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_tstamp ON events(eventtimestamputc)")
         conn.commit()
 
 
@@ -158,6 +161,7 @@ def init_db() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Ensure the events table exists on startup; no cleanup on shutdown."""
+    app.state.db_path = _current_db_path
     init_db()
     yield
 
@@ -174,6 +178,20 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+def create_app(db_path: Optional[str] = None) -> FastAPI:
+    """
+    Return the FastAPI app, optionally configured to use a specific DB path.
+
+    When db_path is provided (e.g. in tests), all DB access uses that path
+    and app.state.db_path is set so callers can read it. When db_path is None,
+    EVENTS_DB_PATH env or the default (events.db next to main.py) is used.
+    """
+    global _current_db_path
+    _current_db_path = db_path if db_path is not None else DB_PATH
+    app.state.db_path = _current_db_path
+    return app
 
 
 # -----------------------------------------------------------------------------
@@ -291,8 +309,10 @@ def generate_event_chart() -> Optional[str]:
         )
         rows = cursor.fetchall()
 
+    if not rows:
+        return None
     df = pd.DataFrame(rows, columns=["eventtimestamputc", "userid", "eventname"])
-    if df.empty or "userid" not in df.columns:
+    if df.empty:
         return None
 
     event_counts = df["userid"].value_counts()
@@ -327,7 +347,7 @@ def generate_event_chart() -> Optional[str]:
     tags=["Events"],
     response_model=EventRecordedOut,
 )
-async def record_event(event: EventIn) -> EventRecordedOut:
+def record_event(event: EventIn) -> EventRecordedOut:
     _insert_event(event.user_id, event.event_name)
     return EventRecordedOut(status="event recorded")
 
@@ -339,7 +359,7 @@ async def record_event(event: EventIn) -> EventRecordedOut:
     tags=["Events"],
     response_model=ReportsOut,
 )
-async def get_user_event_reports(payload: ReportsRequest) -> ReportsOut:
+def get_user_event_reports(payload: ReportsRequest) -> ReportsOut:
     reports = _fetch_reports(payload.user_id, payload.last_seconds)
     return ReportsOut(reports=reports)
 
@@ -355,10 +375,10 @@ def trigger_outbound_call(payload: CallUserRequest) -> CallUserOut:
     try:
         result = phone_caller(payload.phone_number)
     except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
         logger.exception("Unexpected error in trigger_outbound_call")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.") from e
 
     return CallUserOut(status="calling", bland_response=result)
 

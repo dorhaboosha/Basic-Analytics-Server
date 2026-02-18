@@ -93,14 +93,12 @@ curl -X POST "http://localhost:8000/outreach/call"   -H "Content-Type: applicati
 
 Create a `.env` file (not committed) or export variables in your shell.
 
-**Required**
-- `EVENTS_DB_PATH` – path to the sqlite file (example: `./events.db`)
+**Optional**
+- `EVENTS_DB_PATH` – path to the SQLite file; when unset, the app uses `events.db` in the same directory as `main.py` (see `DB_PATH` in `main.py`). Set this to override the default.
+- `PORT` – server port (default `8000`)
 
 **Required only for Bland.ai calling**
 - `BLAND_API_KEY` – required for `POST /outreach/call`
-
-**Optional**
-- `PORT` – server port (default `8000`)
 
 Example `.env`:
 ```env
