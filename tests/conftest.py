@@ -1,7 +1,10 @@
 """
 Pytest conftest for Basic Analytics Server tests.
 
-Ensures the project root is on sys.path so tests can import the app (e.g. main, main.app).
+Purpose:
+- Ensures the project root (folder containing main.py) is on sys.path,
+  so tests can import `main` reliably.
+
 Loaded automatically by pytest before test collection.
 """
 
