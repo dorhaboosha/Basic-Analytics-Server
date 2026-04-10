@@ -1,13 +1,14 @@
 """
-Pytest tests for the Basic Analytics Server FastAPI app (new endpoints only).
+Tests for the Basic Analytics Server FastAPI app (new endpoints).
 
-Covers:
-- POST /events
-- POST /events/reports
-- POST /outreach/call (missing-api-key path)
+What’s covered:
+- Events: POST /events
+- Reports: POST /events/reports
+- Outreach: POST /outreach/call (missing BLAND_API_KEY path)
 
-Uses a temporary SQLite DB per test via create_app(db_path); no importlib.reload.
-BLAND_API_KEY is not required except in test_trigger_outbound_call_without_key_returns_400.
+Test isolation:
+- Each test uses its own temporary SQLite database file via create_app(db_path).
+- Tests do not rely on importlib.reload or module-level DB_PATH state.
 """
 
 import sqlite3
@@ -18,11 +19,33 @@ from fastapi.testclient import TestClient
 import main
 
 
+def _fetch_one_event(db_path: str, user_id: str, event_name: str):
+    """
+    Helper to verify persistence by reading SQLite directly.
+
+    Why direct DB access?
+    - It proves the API call resulted in a committed row (not just a 200 response).
+    - It keeps the assertion targeted: one row, one query.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT userid, eventname FROM events WHERE userid=? AND eventname=?",
+            (user_id, event_name),
+        )
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+
 @pytest.fixture()
 def client(tmp_path):
     """
-    Creates a fresh app client using a temporary SQLite DB for each test.
-    Uses create_app(db_path) so tests do not rely on module-level DB_PATH or reload.
+    TestClient configured with an isolated SQLite DB.
+
+    Using create_app(db_path=...) keeps DB configuration explicit and avoids
+    relying on module-level globals during tests.
     """
     test_db_path = tmp_path / "test_events.db"
     app = main.create_app(db_path=str(test_db_path))
@@ -30,19 +53,16 @@ def client(tmp_path):
         yield c
 
 
+# ---- Events -----------------------------------------------------------------
 def test_record_event_inserts_row(client):
     """POST /events with valid JSON returns 200 and persists the event in the DB."""
     resp = client.post("/events", json={"user_id": "test_user", "event_name": "test_event"})
     assert resp.status_code == 200
     assert resp.json() == {"status": "event recorded"}
 
-    # Verify the DB row exists (read the DB file used by the app)
+    # Verify persistence by querying the same DB file the app was configured with.
     db_path = client.app.state.db_path
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute("SELECT userid, eventname FROM events WHERE userid=? AND eventname=?", ("test_user", "test_event"))
-    row = cur.fetchone()
-    conn.close()
+    row = _fetch_one_event(db_path, user_id="test_user", event_name="test_event")
 
     assert row is not None
     assert row[0] == "test_user"
@@ -51,19 +71,22 @@ def test_record_event_inserts_row(client):
 
 def test_record_event_invalid_payload_returns_422(client):
     """POST /events with invalid payload (missing required field) returns 422."""
-    resp = client.post("/events", json={"user_id": "u1"})  # missing "event_name"
+    # Missing required field "event_name" should fail request validation.
+    resp = client.post("/events", json={"user_id": "u1"})
     assert resp.status_code == 422
 
 
+# ---- Reports ----------------------------------------------------------------
 def test_get_user_event_reports_returns_events(client):
     """POST /events/reports returns events for a user within the last N seconds."""
-    # Insert an event
+    # Arrange: insert an event.
     client.post("/events", json={"user_id": "u1", "event_name": "e1"})
 
-    # Fetch reports (new endpoint uses JSON body)
+    # Act: fetch reports (endpoint uses JSON body).
     resp = client.post("/events/reports", json={"user_id": "u1", "last_seconds": 60})
     assert resp.status_code == 200
 
+    # Assert: event is present in the response.
     body = resp.json()
     assert "reports" in body
     assert isinstance(body["reports"], list)
@@ -72,10 +95,13 @@ def test_get_user_event_reports_returns_events(client):
     assert body["reports"][0]["event_name"] == "e1"
 
 
+# ---- Outreach ---------------------------------------------------------------
 def test_trigger_outbound_call_without_key_returns_400(tmp_path, monkeypatch):
     """
-    Ensure missing BLAND_API_KEY is handled for POST /outreach/call.
-    Use create_app(test_db_path) and empty BLAND_API_KEY; no reload.
+    Missing BLAND_API_KEY should be treated as a client error (400).
+
+    We set BLAND_API_KEY to an empty string to ensure the code path that checks
+    the environment is exercised (and .env values cannot override it).
     """
     test_db_path = tmp_path / "test_events.db"
     monkeypatch.setenv("BLAND_API_KEY", "")

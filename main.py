@@ -1,15 +1,17 @@
 """
-Basic Analytics Server — FastAPI application for event tracking, reporting, and outreach.
+Basic Analytics Server (FastAPI + SQLite).
 
-This module provides:
-- Event ingestion: record user events via POST /events
-- Event reports: fetch events for a user in a time window via POST /events/reports
-- Outbound calls: trigger a Bland AI sales call via POST /outreach/call (requires BLAND_API_KEY)
-- Event analytics: view a bar chart of events per user via GET /analytics/events-per-user
-- Root redirect: GET / redirects to /docs
+Endpoints:
+- POST /events: record an event
+- POST /events/reports: fetch recent events for a user
+- POST /outreach/call: trigger a Bland AI outbound call (requires BLAND_API_KEY)
+- GET  /analytics/events-per-user: HTML chart of event counts per user
+- GET  /: redirects to /docs
 
-Configuration is read from a .env file in the project directory.
-The SQLite database path can be overridden with EVENTS_DB_PATH (default: events.db next to this file).
+Config:
+- .env is loaded from the same directory as this file.
+- EVENTS_DB_PATH (optional) overrides the SQLite file path.
+  Default is events.db next to this file.
 """
 
 from __future__ import annotations
@@ -34,42 +36,42 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
+# ---- logging ----------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------------------------------------
-# Load environment variables from a local ".env" file reliably.
-# -----------------------------------------------------------------------------
+# ---- environment -------------------------------------------------------------
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
 
-# -----------------------------------------------------------------------------
-# Config
-# -----------------------------------------------------------------------------
+# ---- configuration -----------------------------------------------------------
 DB_PATH = os.getenv("EVENTS_DB_PATH", str(Path(__file__).resolve().parent / "events.db"))
 _current_db_path: str = DB_PATH
 
-# Simple E.164 phone validation: + + 8-16 digits total (first digit 1-9)
+# E.164 phone format: "+" followed by 8–16 digits (first digit 1–9)
 E164_REGEX = re.compile(r"^\+[1-9]\d{7,15}$")
 
-# Limit chart to recent data to avoid unbounded memory use
+# Chart generation reads a bounded, recent slice of events.
 CHART_DAYS = 90
 CHART_ROW_LIMIT = 100_000
 
-# Serialize matplotlib use (not thread-safe)
+# Matplotlib isn't thread-safe; serialize chart rendering.
 _chart_lock = threading.Lock()
 
-# -----------------------------------------------------------------------------
-# API Schemas (Docs-Friendly)
-# -----------------------------------------------------------------------------
+# ---- pydantic models (request/response) -------------------------------------
 class EventIn(BaseModel):
     """Request body for recording a single analytics event."""
 
-    user_id: str = Field(..., description="Unique identifier of the user who triggered the event.", max_length=256)
-    event_name: str = Field(..., description="Name of the event (e.g., 'signup', 'purchase').", max_length=256)
+    user_id: str = Field(
+        ...,
+        description="Unique identifier of the user who triggered the event.",
+        max_length=256,
+    )
+    event_name: str = Field(
+        ...,
+        description="Name of the event (e.g., 'signup', 'purchase').",
+        max_length=256,
+    )
 
 
 class EventRecordedOut(BaseModel):
@@ -82,7 +84,11 @@ class ReportsRequest(BaseModel):
     """Request body for fetching recent events for a specific user."""
 
     user_id: str = Field(..., description="User identifier to fetch events for.")
-    last_seconds: int = Field(..., gt=0, description="Time window in seconds (e.g., 3600 for last hour).")
+    last_seconds: int = Field(
+        ...,
+        gt=0,
+        description="Time window in seconds (e.g., 3600 for last hour).",
+    )
 
 
 class ReportItem(BaseModel):
@@ -112,16 +118,14 @@ class CallUserOut(BaseModel):
     bland_response: Dict[str, Any] = Field(..., description="Raw response from Bland AI API.")
 
 
-# -----------------------------------------------------------------------------
-# DB helpers
-# -----------------------------------------------------------------------------
+# ---- database ---------------------------------------------------------------
 @contextmanager
 def get_db_connection():
     """
-    Yield a SQLite connection; automatically closed on exit.
+    Context manager for a SQLite connection.
 
-    - Uses _current_db_path (set by create_app or default DB_PATH).
-    - Rows are sqlite3.Row dict-like objects.
+    Uses `_current_db_path` (set via `create_app()` or the default `DB_PATH`).
+    Rows are returned as `sqlite3.Row` (dict-like).
     """
     conn = sqlite3.connect(_current_db_path)
     conn.row_factory = sqlite3.Row
@@ -133,12 +137,12 @@ def get_db_connection():
 
 def init_db() -> None:
     """
-    Create the events table if it does not exist.
+    Initialize SQLite schema (table + indexes).
 
-    Table schema:
-      - eventtimestamputc (TEXT)
-      - userid            (TEXT)
-      - eventname         (TEXT)
+    The table stores:
+    - eventtimestamputc: ISO timestamp (UTC)
+    - userid: user identifier
+    - eventname: event identifier/name
     """
     with get_db_connection() as conn:
         conn.execute(
@@ -155,9 +159,7 @@ def init_db() -> None:
         conn.commit()
 
 
-# -----------------------------------------------------------------------------
-# Lifespan
-# -----------------------------------------------------------------------------
+# ---- lifespan ---------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Ensure the events table exists on startup; no cleanup on shutdown."""
@@ -166,9 +168,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-# -----------------------------------------------------------------------------
-# App
-# -----------------------------------------------------------------------------
+# ---- app --------------------------------------------------------------------
 app = FastAPI(
     title="Basic Analytics Server",
     description=(
@@ -182,11 +182,10 @@ app = FastAPI(
 
 def create_app(db_path: Optional[str] = None) -> FastAPI:
     """
-    Return the FastAPI app, optionally configured to use a specific DB path.
+    Configure the app to use a specific DB file and return the app.
 
-    When db_path is provided (e.g. in tests), all DB access uses that path
-    and app.state.db_path is set so callers can read it. When db_path is None,
-    EVENTS_DB_PATH env or the default (events.db next to main.py) is used.
+    - If `db_path` is provided (e.g. tests), DB access uses that path.
+    - Otherwise, uses `EVENTS_DB_PATH` or the default `events.db` next to this file.
     """
     global _current_db_path
     _current_db_path = db_path if db_path is not None else DB_PATH
@@ -194,18 +193,14 @@ def create_app(db_path: Optional[str] = None) -> FastAPI:
     return app
 
 
-# -----------------------------------------------------------------------------
-# Root redirect to docs
-# -----------------------------------------------------------------------------
+# ---- routes -----------------------------------------------------------------
 @app.get("/", include_in_schema=False)
 def root() -> RedirectResponse:
     """Redirect the root URL to the interactive API documentation."""
     return RedirectResponse(url="/docs")
 
 
-# -----------------------------------------------------------------------------
-# Internal logic helpers
-# -----------------------------------------------------------------------------
+# ---- internal helpers --------------------------------------------------------
 def _insert_event(user_id: str, event_name: str) -> None:
     """Insert a single event row with current UTC timestamp."""
     with get_db_connection() as conn:
@@ -221,7 +216,7 @@ def _insert_event(user_id: str, event_name: str) -> None:
 
 
 def _fetch_reports(user_id: str, last_seconds: int) -> List[ReportItem]:
-    """Fetch event rows for a user within the last N seconds and map them to ReportItem."""
+    """Fetch events for a user within the last N seconds."""
     from_datetime = datetime.now(timezone.utc) - timedelta(seconds=last_seconds)
 
     with get_db_connection() as conn:
@@ -249,11 +244,7 @@ def phone_caller(phone_number: str) -> Dict[str, Any]:
     """
     Initiate a Bland AI sales call to the given E.164 phone number.
 
-    Requires:
-      - BLAND_API_KEY in environment (.env or container env var)
-
-    Raises:
-      - RuntimeError for validation / external API errors
+    Raises RuntimeError for missing key, validation failures, or API errors.
     """
     api_key = os.getenv("BLAND_API_KEY")
     if not api_key:
@@ -292,8 +283,7 @@ def generate_event_chart() -> Optional[str]:
     """
     Build a bar chart of event counts per user from recent events.
 
-    Returns:
-      - base64 PNG string (no prefix), or None if no data exists.
+    Returns base64 PNG (no data-URI prefix), or None if no data exists.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -337,9 +327,7 @@ def generate_event_chart() -> Optional[str]:
     return image_base64
 
 
-# -----------------------------------------------------------------------------
-# Endpoints (new only)
-# -----------------------------------------------------------------------------
+# ---- endpoints --------------------------------------------------------------
 @app.post(
     "/events",
     summary="Record an event",
